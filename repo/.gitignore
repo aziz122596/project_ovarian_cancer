@@ -41,3 +41,9 @@ results/protein_lists/*.txt
 
 *.pkl
 *.npz
+
+*.xlsm
+*.xlsx
+APOLLO2_*
+proteinGroups_*
+Ø*

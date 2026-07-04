@@ -1,7 +1,5 @@
 """
 Скрипт 2: Сравнение 4 подходов × 6 моделей машинного обучения
-=============================================================
-
 ВХОД:  data/matrix_after_project_zscore_no_imputation.xlsx
 ВЫХОД: results/tables/summary_AUROC.csv
        results/tables/summary_AUPRC.csv
@@ -151,6 +149,101 @@ A_results = run_lopo(X_T, y_T, g_T, "A: 3 проекта ткани")
 
 
 def t_stats(X, y):
+    # (определение ниже используется и в leakage-free функциях)
+    ts = np.zeros(X.shape[1]); ps = np.ones(X.shape[1])
+    for i in range(X.shape[1]):
+        a, b = X[y == 1, i], X[y == 0, i]
+        if len(np.unique(a)) > 1 and len(np.unique(b)) > 1:
+            t, p = stats.ttest_ind(a, b, equal_var=False)
+            ts[i], ps[i] = t, p
+    return ts, ps
+
+
+def _universal_mask_from(tT, pT, tE, pE):
+    return (
+        (pT < UNIVERSAL_P_THRESHOLD) & (pE < UNIVERSAL_P_THRESHOLD) &
+        (np.sign(tT) == np.sign(tE)) &
+        (np.abs(tT) > UNIVERSAL_T_THRESHOLD) & (np.abs(tE) > UNIVERSAL_T_THRESHOLD)
+    )
+
+
+def run_lopo_universal_perfold(X, y, groups, material, label):
+    """Подход B без утечки: маска universal пересчитывается ВНУТРИ каждого
+    обучающего фолда только по train-образцам (тестовый проект не виден).
+    Когда тестовый фолд = проект EVs и в train EVs нет, мягкий fallback по
+    train-only значимости (top-50). в обучении не участвует."""
+    print(f"\n── {label} (leakage-free) ──")
+    logo = LeaveOneGroupOut()
+    results = {}
+    for name, base in make_models().items():
+        pooled_yt, pooled_yp = [], []
+        for tr_idx, te_idx in logo.split(X, y, groups):
+            Xtr, ytr, mtr = X[tr_idx], y[tr_idx], material[tr_idx]
+            Xte, yte = X[te_idx], y[te_idx]
+            tr_tis = mtr == 'Tissue'; tr_ev = mtr == 'EVs'
+            P = Xtr.shape[1]
+            if tr_tis.sum() > 3:
+                tT, pT = t_stats(Xtr[tr_tis], ytr[tr_tis])
+            else:
+                tT, pT = np.zeros(P), np.ones(P)
+            if tr_ev.sum() > 3 and len(np.unique(ytr[tr_ev])) == 2:
+                tE, pE = t_stats(Xtr[tr_ev], ytr[tr_ev])
+                mask = _universal_mask_from(tT, pT, tE, pE)
+                idx = np.where(mask)[0]
+                if len(idx) < 5:
+                    soft = ((-np.log10(np.maximum(pT, 1e-300)) - np.log10(np.maximum(pE, 1e-300)))
+                            * (np.sign(tT) == np.sign(tE)))
+                    idx = np.argsort(-soft)[:50]
+            else:
+                # train без EVs (тестируем на EV-проекте): только тканевая значимость
+                idx = np.where((pT < UNIVERSAL_P_THRESHOLD) & (np.abs(tT) > UNIVERSAL_T_THRESHOLD))[0]
+                if len(idx) < 5:
+                    idx = np.argsort(-np.abs(tT))[:50]
+            rec = eval_split(Xtr[:, idx], ytr, Xte[:, idx], yte, base)
+            pooled_yt.extend(rec['y_true']); pooled_yp.extend(rec['proba'])
+        pyt, pyp = np.array(pooled_yt), np.array(pooled_yp)
+        results[name] = {'pooled_auroc': roc_auc_score(pyt, pyp),
+                         'pooled_auprc': average_precision_score(pyt, pyp),
+                         'y_true': pyt, 'y_proba': pyp}
+        print(f"  {name:20s} AUROC={results[name]['pooled_auroc']:.3f}  "
+              f"AUPRC={results[name]['pooled_auprc']:.3f}")
+    return results
+
+
+def run_lopo_material_perfold(X, y, groups, material, label):
+    """Подход D без утечки: StandardScaler по материалу обучается ТОЛЬКО на train
+    каждого фолда и применяется к test тем же скейлером."""
+    print(f"\n── {label} (leakage-free) ──")
+    logo = LeaveOneGroupOut()
+    mat_feat_all = (material == 'EVs').astype(float).reshape(-1, 1)
+    results = {}
+    for name, base in make_models().items():
+        pooled_yt, pooled_yp = [], []
+        for tr_idx, te_idx in logo.split(X, y, groups):
+            Xtr = X[tr_idx].copy(); Xte = X[te_idx].copy()
+            mtr = material[tr_idx]; mte = material[te_idx]
+            for mat in ['Tissue', 'EVs']:
+                tr_m = mtr == mat
+                if tr_m.sum() > 1:
+                    sc = StandardScaler().fit(Xtr[tr_m])
+                    Xtr[tr_m] = sc.transform(Xtr[tr_m])
+                    te_m = mte == mat
+                    if te_m.sum() > 0:
+                        Xte[te_m] = sc.transform(Xte[te_m])
+            Xtr_a = np.hstack([Xtr, mat_feat_all[tr_idx]])
+            Xte_a = np.hstack([Xte, mat_feat_all[te_idx]])
+            rec = eval_split(Xtr_a, y[tr_idx], Xte_a, y[te_idx], base)
+            pooled_yt.extend(rec['y_true']); pooled_yp.extend(rec['proba'])
+        pyt, pyp = np.array(pooled_yt), np.array(pooled_yp)
+        results[name] = {'pooled_auroc': roc_auc_score(pyt, pyp),
+                         'pooled_auprc': average_precision_score(pyt, pyp),
+                         'y_true': pyt, 'y_proba': pyp}
+        print(f"  {name:20s} AUROC={results[name]['pooled_auroc']:.3f}  "
+              f"AUPRC={results[name]['pooled_auprc']:.3f}")
+    return results
+
+
+def _t_stats_unused(X, y):
     ts = np.zeros(X.shape[1]); ps = np.ones(X.shape[1])
     for i in range(X.shape[1]):
         a, b = X[y == 1, i], X[y == 0, i]
@@ -191,7 +284,8 @@ else:
 print(f"  Используем {len(universal_idx)} белков для модели B")
 
 X_universal = X_full[:, universal_idx]
-B_results = run_lopo(X_universal, y_full, groups_full, "B: LOPO на universal")
+B_results = run_lopo_universal_perfold(X_full, y_full, groups_full, material_full,
+                                       "B: Universal markers LOPO")
 
 print("\n" + "=" * 65)
 print("C) STRATIFIED — EVs internal CV")
@@ -218,14 +312,8 @@ for name, base in make_models().items():
     }
     print(f"  {name:20s} pooled AUROC={C_ev_results[name]['pooled_auroc']:.3f}")
 
-X_d = X_full.copy()
-for material_label in ['Tissue', 'EVs']:
-    mat_mask = material_full == material_label
-    if mat_mask.sum() > 1:
-        X_d[mat_mask] = StandardScaler().fit_transform(X_d[mat_mask])
-material_feat = (material_full == 'EVs').astype(float).reshape(-1, 1)
-X_d_aug = np.hstack([X_d, material_feat])
-D_results = run_lopo(X_d_aug, y_full, groups_full, "D: material-aware LOPO")
+D_results = run_lopo_material_perfold(X_full, y_full, groups_full, material_full,
+                                      "D: material-aware LOPO")
 
 models = list(make_models().keys())
 summary_auroc = pd.DataFrame({

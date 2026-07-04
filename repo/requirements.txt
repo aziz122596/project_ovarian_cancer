@@ -7,3 +7,4 @@ seaborn>=0.11
 openpyxl>=3.0
 imbalanced-learn>=0.10
 umap-learn>=0.5
+xgboost>=1.7
