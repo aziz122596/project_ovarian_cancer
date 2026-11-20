@@ -75,3 +75,14 @@ python 07_external_validation_prep.py
 ## Контакты
 
 ИБМХ
+
+## Дополнительные анализы ревизии / Additional analyses added in revision
+
+Скрипты дополнительных расчётов, выполненных при доработке рукописи (поправка на множественность,
+AUROC по проектам с бутстрэп-интервалами, перестановочный тест, ComBat/CORAL, анализ чувствительности,
+классификация подтипов только на карциномах), находятся в `repo/scripts/revision/`.
+Описание и порядок запуска: `repo/scripts/revision/README_revision.md`.
+
+Scripts of the additional analyses added in revision are in `repo/scripts/revision/`
+(see `README_revision.md` there). Pinned environments: `repo/requirements.txt` (primary analysis)
+and `repo/requirements-revision.txt` (revision analyses).
